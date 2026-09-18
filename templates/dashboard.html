@@ -1,0 +1,498 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Quota and Telemetry Dashboard</title>
+    <style>
+        :root {
+            --bg-page: #f3f4f6;
+            --bg-card: #ffffff;
+            --bg-subtle: #f9fafb;
+            --border: #e5e7eb;
+            --text-main: #111827;
+            --text-sub: #4b5563;
+            --text-muted: #9ca3af;
+            --code-bg: #f3f4f6;
+            --code-text: #1f2937;
+            --bar-bg: #e5e7eb;
+            --accent: #2563eb;
+            --danger: #dc2626;
+            --success: #16a34a;
+        }
+
+        [data-theme="dark"] {
+            --bg-page: #0b0f19;
+            --bg-card: #111827;
+            --bg-subtle: #1f2937;
+            --border: #374151;
+            --text-main: #f9fafb;
+            --text-sub: #9ca3af;
+            --text-muted: #6b7280;
+            --code-bg: #090d16;
+            --code-text: #d1d5db;
+            --bar-bg: #374151;
+            --accent: #3b82f6;
+            --danger: #ef4444;
+            --success: #10b981;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            transition: background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease;
+        }
+
+        body {
+            background-color: var(--bg-page);
+            color: var(--text-main);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 24px;
+        }
+
+        .dashboard-container {
+            width: 100%;
+            max-width: 900px;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.1);
+            overflow: hidden;
+        }
+
+        .header {
+            padding: 24px 32px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 16px;
+        }
+
+        .header-title {
+            font-size: 1.25rem;
+            font-weight: 700;
+            letter-spacing: -0.02em;
+        }
+
+        .header-subtitle {
+            font-size: 0.85rem;
+            color: var(--text-sub);
+            margin-top: 4px;
+        }
+
+        .header-controls {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .control-btn {
+            background: var(--bg-subtle);
+            border: 1px solid var(--border);
+            color: var(--text-main);
+            padding: 6px 14px;
+            border-radius: 8px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            cursor: pointer;
+        }
+
+        .control-btn:hover {
+            border-color: var(--accent);
+            color: var(--accent);
+        }
+
+        .badge {
+            padding: 6px 12px;
+            border-radius: 9999px;
+            font-size: 0.75rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            border: 1px solid transparent;
+        }
+
+        .content {
+            padding: 32px;
+        }
+
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 16px;
+            margin-bottom: 28px;
+        }
+
+        .metric-card {
+            background: var(--bg-subtle);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 20px 24px;
+        }
+
+        .metric-label {
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-sub);
+            margin-bottom: 8px;
+        }
+
+        .metric-value {
+            font-size: 2rem;
+            font-weight: 800;
+            line-height: 1.1;
+        }
+
+        .metric-subtext {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            margin-top: 6px;
+        }
+
+        .progress-section {
+            background: var(--bg-subtle);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 20px 24px;
+            margin-bottom: 28px;
+        }
+
+        .progress-header {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 10px;
+            font-size: 0.85rem;
+            font-weight: 600;
+        }
+
+        .progress-bar-bg {
+            width: 100%;
+            height: 8px;
+            background: var(--bar-bg);
+            border-radius: 9999px;
+            overflow: hidden;
+        }
+
+        .progress-bar-fill {
+            height: 100%;
+            background: var(--accent);
+            border-radius: 9999px;
+        }
+
+        .info-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.85rem;
+            margin-bottom: 28px;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            overflow: hidden;
+        }
+
+        .info-table th, .info-table td {
+            padding: 12px 16px;
+            text-align: left;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .info-table th {
+            background: var(--bg-subtle);
+            color: var(--text-sub);
+            font-weight: 600;
+        }
+
+        .info-table td {
+            background: var(--bg-card);
+        }
+
+        .info-table tr:last-child td {
+            border-bottom: none;
+        }
+
+        .raw-title {
+            font-size: 0.8rem;
+            font-weight: 700;
+            color: var(--text-sub);
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        pre {
+            background: var(--code-bg);
+            color: var(--code-text);
+            padding: 16px;
+            border-radius: 8px;
+            border: 1px solid var(--border);
+            overflow-x: auto;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+            font-size: 0.8rem;
+            line-height: 1.45;
+        }
+
+        .footer {
+            padding: 14px 32px;
+            background: var(--bg-subtle);
+            border-top: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+    </style>
+</head>
+<body>
+    <div class="dashboard-container">
+        <div class="header">
+            <div>
+                <div class="header-title" data-i18n="title">Quota and Telemetry Dashboard</div>
+                <div class="header-subtitle" data-i18n="subtitle">Official Upstream Telemetry and Service Status</div>
+            </div>
+            <div class="header-controls">
+                <button id="refresh-btn" class="control-btn" onclick="location.reload()" data-i18n="refreshBtn">Refresh</button>
+                <button id="theme-btn" class="control-btn" onclick="toggleTheme()">Theme: Auto</button>
+                <button id="lang-btn" class="control-btn" onclick="toggleLanguage()">Language: Auto</button>
+                <span id="status-badge" class="badge">Checking</span>
+            </div>
+        </div>
+
+        <div class="content">
+            <div class="metrics-grid">
+                <div class="metric-card">
+                    <div class="metric-label" data-i18n="metricRemaining">Remaining Requests</div>
+                    <div id="metric-remaining-val" class="metric-value">{{remaining}}</div>
+                    <div class="metric-subtext" data-i18n="metricRemainingSub">Queries left for current cycle</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label" data-i18n="metricUsed">Used Requests</div>
+                    <div class="metric-value">{{used}}</div>
+                    <div class="metric-subtext" data-i18n="metricUsedSub">Total queries consumed</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label" data-i18n="metricLimit">Cycle Limit</div>
+                    <div class="metric-value">{{limit}}</div>
+                    <div class="metric-subtext" data-i18n="metricLimitSub">Max allowable queries</div>
+                </div>
+            </div>
+
+            <div class="progress-section">
+                <div class="progress-header">
+                    <span data-i18n="progressTitle">Quota Consumption</span>
+                    <span>{{percentage}}% ({{used}} / {{limit}})</span>
+                </div>
+                <div class="progress-bar-bg">
+                    <div class="progress-bar-fill" style="width: {{percentage}}%;"></div>
+                </div>
+            </div>
+
+            <table class="info-table">
+                <thead>
+                    <tr>
+                        <th data-i18n="colParam">Parameter</th>
+                        <th data-i18n="colValue">Status / Value</th>
+                        <th data-i18n="colDesc">Description</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td data-i18n="paramRole">Role</td>
+                        <td><code>{{role}}</code></td>
+                        <td data-i18n="descRole">Account permission profile</td>
+                    </tr>
+                    <tr>
+                        <td data-i18n="paramExceeded">Exceeded</td>
+                        <td><code>{{exceeded}}</code></td>
+                        <td data-i18n="descExceeded">Whether current cycle quota has been exhausted</td>
+                    </tr>
+                    <tr>
+                        <td data-i18n="paramBan">Security Ban</td>
+                        <td><code>{{banned}}</code></td>
+                        <td data-i18n="descBan">Account restriction flag from security WAF</td>
+                    </tr>
+                    <tr>
+                        <td data-i18n="paramTtl">Ban TTL</td>
+                        <td><code>{{ban_ttl}}s</code></td>
+                        <td data-i18n="descTtl">Remaining duration until account unban</td>
+                    </tr>
+                    <tr>
+                        <td data-i18n="paramFingerprint">Token Fingerprint</td>
+                        <td><code>{{token_preview}}</code></td>
+                        <td data-i18n="descFingerprint">Masked active authentication credential</td>
+                    </tr>
+                    <tr>
+                        <td data-i18n="paramModels">Registered Endpoints</td>
+                        <td><code>Chat, Deep (xxhd), English (en), TTS, ASR</code></td>
+                        <td data-i18n="descModels">Native OpenAI protocol coverage</td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <div class="raw-title" data-i18n="rawTitle">Upstream JSON Response</div>
+            <pre><code>{{pretty_json}}</code></pre>
+        </div>
+
+        <div class="footer">
+            <span>fanzha-ai-proxy v4.2.0</span>
+            <span data-i18n="footerNode">Local Proxy Node: 127.0.0.1:{{port}}</span>
+        </div>
+    </div>
+
+    <script>
+        const i18nData = {
+            en: {
+                title: "Quota and Telemetry Dashboard",
+                subtitle: "Official Upstream Telemetry and Service Status",
+                refreshBtn: "Refresh",
+                themeBtn: "Theme",
+                langBtn: "Language",
+                statusNormal: "Operational",
+                statusBanned: "Banned",
+                statusExceeded: "Exceeded",
+                metricRemaining: "Remaining Requests",
+                metricRemainingSub: "Queries left for current cycle",
+                metricUsed: "Used Requests",
+                metricUsedSub: "Total queries consumed",
+                metricLimit: "Cycle Limit",
+                metricLimitSub: "Max allowable queries",
+                progressTitle: "Quota Consumption",
+                colParam: "Parameter",
+                colValue: "Status / Value",
+                colDesc: "Description",
+                paramRole: "Role",
+                descRole: "Account permission profile",
+                paramExceeded: "Exceeded",
+                descExceeded: "Whether current cycle quota has been exhausted",
+                paramBan: "Security Ban",
+                descBan: "Account restriction flag from security WAF",
+                paramTtl: "Ban TTL",
+                descTtl: "Remaining duration until account unban",
+                paramFingerprint: "Token Fingerprint",
+                descFingerprint: "Masked active authentication credential",
+                paramModels: "Registered Endpoints",
+                descModels: "Native OpenAI protocol coverage",
+                rawTitle: "Upstream JSON Response",
+                footerNode: "Local Proxy Node: 127.0.0.1:{{port}}"
+            },
+            zh: {
+                title: "账户配额与运行监控面板",
+                subtitle: "官方上游遥测与服务运行状态",
+                refreshBtn: "刷新",
+                themeBtn: "主题",
+                langBtn: "语言",
+                statusNormal: "运行正常",
+                statusBanned: "已封禁",
+                statusExceeded: "配额耗尽",
+                metricRemaining: "剩余提问次数",
+                metricRemainingSub: "当前周期剩余可用额度",
+                metricUsed: "已使用次数",
+                metricUsedSub: "累计消耗提问次数",
+                metricLimit: "周期总限额",
+                metricLimitSub: "单周期最大允许提问次数",
+                progressTitle: "配额消耗进度",
+                colParam: "参数名称",
+                colValue: "状态 / 数值",
+                colDesc: "参数说明",
+                paramRole: "角色权限",
+                descRole: "当前账户权限配置分组",
+                paramExceeded: "配额状态",
+                descExceeded: "当前周期调用额度是否已耗尽",
+                paramBan: "安全封禁",
+                descBan: "上游安全防火墙封禁状态",
+                paramTtl: "封禁倒计时",
+                descTtl: "距离账号自动解封剩余秒数",
+                paramFingerprint: "凭证指纹",
+                descFingerprint: "当前生效的鉴权凭证脱敏指纹",
+                paramModels: "挂载端点",
+                descModels: "标准 OpenAI 协议覆盖能力",
+                rawTitle: "上游原始响应数据",
+                footerNode: "本地代理节点: 127.0.0.1:{{port}}"
+            }
+        };
+
+        const isBanned = {{banned_bool}};
+        const isExceeded = {{exceeded_bool}};
+
+        function detectBrowserTheme() {
+            return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+        }
+
+        function detectBrowserLang() {
+            const lang = (navigator.language || (navigator.languages && navigator.languages[0]) || 'en').toLowerCase();
+            return lang.startsWith('zh') ? 'zh' : 'en';
+        }
+
+        let currentTheme = detectBrowserTheme();
+        let currentLang = detectBrowserLang();
+
+        function applyTheme(theme) {
+            currentTheme = theme;
+            document.documentElement.setAttribute('data-theme', theme);
+            const themeLabel = theme === 'dark' ? 'Dark' : 'Light';
+            document.getElementById('theme-btn').textContent = i18nData[currentLang].themeBtn + ': ' + themeLabel;
+        }
+
+        function applyLanguage(lang) {
+            currentLang = lang;
+            const dict = i18nData[lang];
+            document.querySelectorAll('[data-i18n]').forEach(el => {
+                const key = el.getAttribute('data-i18n');
+                if (dict[key]) {
+                    el.textContent = dict[key];
+                }
+            });
+
+            const langLabel = lang === 'zh' ? '中文' : 'EN';
+            document.getElementById('lang-btn').textContent = dict.langBtn + ': ' + langLabel;
+            applyTheme(currentTheme);
+            updateBadge();
+        }
+
+        function updateBadge() {
+            const badge = document.getElementById('status-badge');
+            const remainingVal = document.getElementById('metric-remaining-val');
+            const dict = i18nData[currentLang];
+
+            if (isBanned) {
+                badge.textContent = dict.statusBanned;
+                badge.style.backgroundColor = 'rgba(239, 68, 68, 0.15)';
+                badge.style.color = '#ef4444';
+                badge.style.borderColor = '#ef4444';
+                remainingVal.style.color = '#ef4444';
+            } else if (isExceeded) {
+                badge.textContent = dict.statusExceeded;
+                badge.style.backgroundColor = 'rgba(245, 158, 11, 0.15)';
+                badge.style.color = '#f59e0b';
+                badge.style.borderColor = '#f59e0b';
+                remainingVal.style.color = '#f59e0b';
+            } else {
+                badge.textContent = dict.statusNormal;
+                badge.style.backgroundColor = 'rgba(16, 185, 129, 0.15)';
+                badge.style.color = '#10b981';
+                badge.style.borderColor = '#10b981';
+                remainingVal.style.color = '#10b981';
+            }
+        }
+
+        function toggleTheme() {
+            applyTheme(currentTheme === 'dark' ? 'light' : 'dark');
+        }
+
+        function toggleLanguage() {
+            applyLanguage(currentLang === 'zh' ? 'en' : 'zh');
+        }
+
+        applyLanguage(currentLang);
+        applyTheme(currentTheme);
+    </script>
+</body>
+</html>

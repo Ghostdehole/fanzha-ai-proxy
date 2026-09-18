@@ -6,11 +6,16 @@
 test.py
 test_chat.py
 test*.py
+*.wav
+*.mp3
+*.webm
+*.ogg
 
 __pycache__/
 *.py[cod]
 *$py.class
 *.log
+*.pyc
 
 venv/
 .venv/
@@ -23,3 +28,7 @@ ENV/
 *.swo
 .DS_Store
 Thumbs.db
+
+build/
+dist/
+*.egg-info/
