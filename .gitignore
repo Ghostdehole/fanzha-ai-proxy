@@ -3,9 +3,11 @@
 .env.*.local
 .env.txt
 
-test.py
-test_chat.py
-test*.py
+.pytest_cache/
+.coverage
+htmlcov/
+.fanzha-token-state.json
+.fanzha-token-state.json.*
 *.wav
 *.mp3
 *.webm

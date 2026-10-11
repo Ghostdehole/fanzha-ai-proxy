@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Quota and Telemetry Dashboard</title>
-    <style>
+    <style nonce="{{nonce}}">
         :root {
             --bg-page: #f3f4f6;
             --bg-card: #ffffff;
@@ -173,19 +173,32 @@
             font-weight: 600;
         }
 
-        .progress-bar-bg {
+        .progress-bar {
+            display: block;
             width: 100%;
             height: 8px;
-            background: var(--bar-bg);
+            appearance: none;
+            border: 0;
             border-radius: 9999px;
             overflow: hidden;
+            background: var(--bar-bg);
+            accent-color: var(--accent);
         }
 
-        .progress-bar-fill {
-            height: 100%;
-            background: var(--accent);
-            border-radius: 9999px;
+        .progress-bar::-webkit-progress-bar { background: var(--bar-bg); }
+        .progress-bar::-webkit-progress-value { background: var(--accent); }
+        .progress-bar::-moz-progress-bar { background: var(--accent); }
+
+        .error-banner {
+            border: 1px solid var(--danger);
+            background: var(--bg-subtle);
+            border-radius: 8px;
+            padding: 16px;
+            margin-bottom: 24px;
+            overflow-wrap: anywhere;
         }
+
+        .error-banner p { margin-top: 8px; color: var(--text-sub); }
 
         .info-table {
             width: 100%;
@@ -256,17 +269,21 @@
         <div class="header">
             <div>
                 <div class="header-title" data-i18n="title">Quota and Telemetry Dashboard</div>
-                <div class="header-subtitle" data-i18n="subtitle">Official Upstream Telemetry and Service Status</div>
+                <div class="header-subtitle" data-i18n="subtitle">Upstream Account Quota and Restriction Status</div>
             </div>
             <div class="header-controls">
-                <button id="refresh-btn" class="control-btn" onclick="location.reload()" data-i18n="refreshBtn">Refresh</button>
-                <button id="theme-btn" class="control-btn" onclick="toggleTheme()">Theme: Auto</button>
-                <button id="lang-btn" class="control-btn" onclick="toggleLanguage()">Language: Auto</button>
-                <span id="status-badge" class="badge">Checking</span>
+                <button id="refresh-btn" class="control-btn" data-i18n="refreshBtn">Refresh</button>
+                <button id="theme-btn" class="control-btn">Theme: Auto</button>
+                <button id="lang-btn" class="control-btn">Language: Auto</button>
+                <span id="status-badge" class="badge" data-i18n="{{status_key}}" data-state="{{state}}">{{status_text}}</span>
             </div>
         </div>
 
         <div class="content">
+            <div id="error-banner" class="error-banner" role="alert" {{error_hidden}}>
+                <strong data-i18n="errorTitle">Quota status unavailable</strong>
+                <p>{{error}}</p>
+            </div>
             <div class="metrics-grid">
                 <div class="metric-card">
                     <div class="metric-label" data-i18n="metricRemaining">Remaining Requests</div>
@@ -288,11 +305,9 @@
             <div class="progress-section">
                 <div class="progress-header">
                     <span data-i18n="progressTitle">Quota Consumption</span>
-                    <span>{{percentage}}% ({{used}} / {{limit}})</span>
+                    <span>{{percentage_label}} ({{used}} / {{limit}})</span>
                 </div>
-                <div class="progress-bar-bg">
-                    <div class="progress-bar-fill" style="width: {{percentage}}%;"></div>
-                </div>
+                <progress class="progress-bar" max="100" value="{{percentage}}" aria-label="Quota consumption">{{percentage_label}}</progress>
             </div>
 
             <table class="info-table">
@@ -325,14 +340,14 @@
                         <td data-i18n="descTtl">Remaining duration until account unban</td>
                     </tr>
                     <tr>
-                        <td data-i18n="paramFingerprint">Token Fingerprint</td>
-                        <td><code>{{token_preview}}</code></td>
-                        <td data-i18n="descFingerprint">Masked active authentication credential</td>
+                        <td data-i18n="paramFingerprint">Authentication</td>
+                        <td><code data-i18n="{{token_status_key}}">{{token_status}}</code></td>
+                        <td data-i18n="descFingerprint">Whether an upstream credential is configured</td>
                     </tr>
                     <tr>
                         <td data-i18n="paramModels">Registered Endpoints</td>
                         <td><code>Chat, Deep (xxhd), English (en), TTS, ASR</code></td>
-                        <td data-i18n="descModels">Native OpenAI protocol coverage</td>
+                        <td data-i18n="descModels">Supported proxy API endpoints</td>
                     </tr>
                 </tbody>
             </table>
@@ -342,20 +357,24 @@
         </div>
 
         <div class="footer">
-            <span>fanzha-ai-proxy v4.2.0</span>
-            <span data-i18n="footerNode">Local Proxy Node: 127.0.0.1:{{port}}</span>
+            <span>fanzha-ai-proxy v4.3.0</span>
+            <span><span data-i18n="footerNode">Local Proxy Node</span>: 127.0.0.1:{{port}}</span>
         </div>
     </div>
 
-    <script>
+    <script nonce="{{nonce}}">
         const i18nData = {
             en: {
                 title: "Quota and Telemetry Dashboard",
-                subtitle: "Official Upstream Telemetry and Service Status",
+                subtitle: "Upstream Account Quota and Restriction Status",
                 refreshBtn: "Refresh",
                 themeBtn: "Theme",
                 langBtn: "Language",
-                statusNormal: "Operational",
+                statusNormal: "Quota available",
+                statusUnknown: "Unavailable",
+                errorTitle: "Quota status unavailable",
+                credentialConfigured: "Configured",
+                credentialMissing: "Not configured",
                 statusBanned: "Banned",
                 statusExceeded: "Exceeded",
                 metricRemaining: "Remaining Requests",
@@ -376,20 +395,24 @@
                 descBan: "Account restriction flag from security WAF",
                 paramTtl: "Ban TTL",
                 descTtl: "Remaining duration until account unban",
-                paramFingerprint: "Token Fingerprint",
-                descFingerprint: "Masked active authentication credential",
+                paramFingerprint: "Authentication",
+                descFingerprint: "Whether an upstream credential is configured",
                 paramModels: "Registered Endpoints",
-                descModels: "Native OpenAI protocol coverage",
+                descModels: "Supported proxy API endpoints",
                 rawTitle: "Upstream JSON Response",
-                footerNode: "Local Proxy Node: 127.0.0.1:{{port}}"
+                footerNode: "Local Proxy Node"
             },
             zh: {
                 title: "账户配额与运行监控面板",
-                subtitle: "官方上游遥测与服务运行状态",
+                subtitle: "上游账户配额与限制状态",
                 refreshBtn: "刷新",
                 themeBtn: "主题",
                 langBtn: "语言",
-                statusNormal: "运行正常",
+                statusNormal: "配额可用",
+                statusUnknown: "状态未知",
+                errorTitle: "无法确认配额状态",
+                credentialConfigured: "已配置",
+                credentialMissing: "未配置",
                 statusBanned: "已封禁",
                 statusExceeded: "配额耗尽",
                 metricRemaining: "剩余提问次数",
@@ -410,17 +433,16 @@
                 descBan: "上游安全防火墙封禁状态",
                 paramTtl: "封禁倒计时",
                 descTtl: "距离账号自动解封剩余秒数",
-                paramFingerprint: "凭证指纹",
-                descFingerprint: "当前生效的鉴权凭证脱敏指纹",
+                paramFingerprint: "鉴权配置",
+                descFingerprint: "是否已配置上游鉴权凭证",
                 paramModels: "挂载端点",
-                descModels: "标准 OpenAI 协议覆盖能力",
+                descModels: "代理支持的接口",
                 rawTitle: "上游原始响应数据",
-                footerNode: "本地代理节点: 127.0.0.1:{{port}}"
+                footerNode: "本地代理节点"
             }
         };
 
-        const isBanned = {{banned_bool}};
-        const isExceeded = {{exceeded_bool}};
+        const quotaState = document.getElementById("status-badge").dataset.state;
 
         function detectBrowserTheme() {
             return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
@@ -443,6 +465,7 @@
 
         function applyLanguage(lang) {
             currentLang = lang;
+            document.documentElement.lang = lang;
             const dict = i18nData[lang];
             document.querySelectorAll('[data-i18n]').forEach(el => {
                 const key = el.getAttribute('data-i18n');
@@ -462,25 +485,18 @@
             const remainingVal = document.getElementById('metric-remaining-val');
             const dict = i18nData[currentLang];
 
-            if (isBanned) {
-                badge.textContent = dict.statusBanned;
-                badge.style.backgroundColor = 'rgba(239, 68, 68, 0.15)';
-                badge.style.color = '#ef4444';
-                badge.style.borderColor = '#ef4444';
-                remainingVal.style.color = '#ef4444';
-            } else if (isExceeded) {
-                badge.textContent = dict.statusExceeded;
-                badge.style.backgroundColor = 'rgba(245, 158, 11, 0.15)';
-                badge.style.color = '#f59e0b';
-                badge.style.borderColor = '#f59e0b';
-                remainingVal.style.color = '#f59e0b';
-            } else {
-                badge.textContent = dict.statusNormal;
-                badge.style.backgroundColor = 'rgba(16, 185, 129, 0.15)';
-                badge.style.color = '#10b981';
-                badge.style.borderColor = '#10b981';
-                remainingVal.style.color = '#10b981';
-            }
+            const states = {
+                banned: { label: 'statusBanned', color: '#ef4444', background: 'rgba(239, 68, 68, 0.15)' },
+                exceeded: { label: 'statusExceeded', color: '#f59e0b', background: 'rgba(245, 158, 11, 0.15)' },
+                normal: { label: 'statusNormal', color: '#10b981', background: 'rgba(16, 185, 129, 0.15)' },
+                unknown: { label: 'statusUnknown', color: '#9ca3af', background: 'rgba(156, 163, 175, 0.15)' }
+            };
+            const state = states[quotaState] || states.unknown;
+            badge.textContent = dict[state.label];
+            badge.style.backgroundColor = state.background;
+            badge.style.color = state.color;
+            badge.style.borderColor = state.color;
+            remainingVal.style.color = state.color;
         }
 
         function toggleTheme() {
@@ -490,6 +506,10 @@
         function toggleLanguage() {
             applyLanguage(currentLang === 'zh' ? 'en' : 'zh');
         }
+
+        document.getElementById('refresh-btn').addEventListener('click', () => location.reload());
+        document.getElementById('theme-btn').addEventListener('click', toggleTheme);
+        document.getElementById('lang-btn').addEventListener('click', toggleLanguage);
 
         applyLanguage(currentLang);
         applyTheme(currentTheme);
