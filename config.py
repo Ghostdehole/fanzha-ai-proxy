@@ -1,7 +1,7 @@
 import ipaddress
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, Tuple
 
 from dotenv import load_dotenv
@@ -18,6 +18,13 @@ def clean_token(token: Optional[str]) -> str:
     parts = value.split(None, 1)
     if parts and parts[0].lower() == "bearer":
         return parts[1].strip() if len(parts) == 2 else ""
+    return value
+
+
+def validate_chat_key(value: str) -> str:
+    """Keep the optional chat-only header valid without disclosing its value."""
+    if not isinstance(value, str) or any(ord(char) < 33 or ord(char) > 126 for char in value):
+        raise ValueError("FANZHA_CHAT_KEY must be empty or contain only visible ASCII characters without whitespace")
     return value
 
 
@@ -66,6 +73,10 @@ class AppConfig:
     max_chat_chars: int = env_positive_int("MAX_CHAT_CHARS", 128000)
     max_tts_chars: int = env_positive_int("MAX_TTS_CHARS", 20000)
     require_stream_done: bool = env_bool("UPSTREAM_REQUIRE_DONE")
+    chat_key: str = field(default_factory=lambda: os.getenv("FANZHA_CHAT_KEY", ""), repr=False)
+
+    def __post_init__(self) -> None:
+        validate_chat_key(self.chat_key)
 
     def validate_server(self) -> None:
         if not 1 <= self.port <= 65535:

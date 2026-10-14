@@ -119,6 +119,9 @@ FANZHA_ACCESS_TOKEN=eyJhbGciOiJIUzI1NiIsInR5cCI6...
 # 可选：国家反诈 AI 刷新令牌 (Refresh Token，用于长效自动续期)
 FANZHA_REFRESH_TOKEN=eyJhbGciOiJIUzI1NiIsInR5cCI6...
 
+# 可选：从本人官方网页聊天请求取得的 X-Chat-Key；上游要求时填写
+FANZHA_CHAT_KEY=
+
 # 默认对话模型
 DEFAULT_MODEL=fanzha-ai
 
@@ -370,6 +373,16 @@ FastAPI 解析文件上传（`/v1/audio/transcriptions`）依赖 `python-multipa
 
 看板出现“状态未知”表示当前无法确认账户状态，不等同于已经封禁，也不能视为额度正常。
 
+### 5. 登录正常，但聊天返回 `403`
+
+先看错误中的 `message`：`This browser origin is not allowed.` 表示浏览器来源未获允许；`Remote access requires PROXY_API_KEY.` 表示远程访问尚未配置代理密钥；`Upstream access was denied.` 表示上游拒绝了请求。它们需要分别排查。
+
+2026-10-14 的官方前端样本显示，聊天请求除 Bearer 令牌外还发送 `X-Chat-Key`。本项目通过 `.env` 中的 `FANZHA_CHAT_KEY` 配置该值，仅用于聊天请求。留空时保持旧版行为；它不替代 Access Token、Refresh Token 或代理密钥。
+
+可从本人登录后的官方网页实际聊天请求取得该头；配套诊断工具若观察到该值，会单独保存本地 `fanzha-chat-key-时间戳.env`。将其中 `FANZHA_CHAT_KEY` 一行加入项目 `.env` 后重启服务。此配置文件含私有值，不要上传、提交或混入诊断 ZIP。
+
+目前的样本仅记录到登录、用户信息和创建会话成功，没有实际聊天请求或 403。因此缺少该头是已确认的协议差异，尚不能认定为全部 403 的原因。不要对 403 反复刷新令牌；还需对照同一网络下官方网页与反代的实际聊天结果。
+
 ---
 
 ## 高级配置与兼容性说明
@@ -378,6 +391,7 @@ FastAPI 解析文件上传（`/v1/audio/transcriptions`）依赖 `python-multipa
 
 | 变量 | 默认值 | 作用 |
 | :--- | :--- | :--- |
+| `FANZHA_CHAT_KEY` | 空 | 官方网页实际聊天请求中的 `X-Chat-Key`，只发给聊天接口，不内置第三方密钥。 |
 | `CORS_ORIGINS` | 空 | 额外可信的浏览器源，逗号分隔；默认允许本机浏览器源。 |
 | `TOKEN_STATE_FILE` | 空 | 刷新凭证持久化文件，建议 `.fanzha-token-state.json`。 |
 | `MAX_REQUEST_BODY_BYTES` | `33554432`（32 MiB） | 整个请求体上限，包含 multipart 开销与分块上传。 |

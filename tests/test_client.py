@@ -449,3 +449,155 @@ def test_anyio_cancel_scope_shields_response_cleanup(endpoint, cancel_at_eof):
                             pass
             assert upstream_stream.closed
     anyio.run(scenario)
+
+
+def official_response(inner_code="10000", payload="wrapped-session", **outer):
+    return {"result": True, "succeed": True, "resultCode": 0,
+            "data": {"code": inner_code, "data": payload}, **outer}
+
+
+@pytest.mark.parametrize("chat_key", ["example-chat-key", ""])
+def test_chat_key_is_optional_and_scoped_to_chat_only(chat_key):
+    async def scenario():
+        requests = []
+
+        def handler(request):
+            requests.append(request)
+            path = request.url.path
+            if path.endswith("/refresh"):
+                return httpx.Response(200, json={"data": {"access_token": "new-token"}})
+            if path.endswith("/create_session"):
+                return httpx.Response(200, json={"data": "session"})
+            if path.endswith("/usage"):
+                return httpx.Response(200, json={"data": {"remaining": 5}})
+            if path.endswith("/volcengine"):
+                return httpx.Response(200, json={"data": {"audio": base64.b64encode(wav_audio()).decode()}})
+            if path.endswith("/audio"):
+                return httpx.Response(200, json={"data": "recognized"})
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, content="data: [DONE]\n\n")
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            service = AntiFraudClient(config(chat_key=chat_key), http)
+            assert await service.create_session() == "session"
+            await service.fetch_usage()
+            await service.synthesize_speech("hello")
+            await service.transcribe_audio(b"audio", "test.wav", "audio/wav")
+            await service.refresh_token_if_needed()
+            async with await service.request_chat_stream("session", "hello", []) as response:
+                await response.aread()
+            assert "x-chat-key" not in {key.lower() for key in service.build_headers("token")}
+        assert len(requests) == 6
+        for request in requests:
+            expected = chat_key if request.url.path.endswith("/chat") and chat_key else None
+            assert request.headers.get("x-chat-key") == expected
+    asyncio.run(scenario())
+
+
+def test_unset_chat_key_preserves_legacy_configuration_behavior():
+    async def scenario():
+        def handler(request):
+            assert "x-chat-key" not in request.headers
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, content="data: [DONE]\n\n")
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            async with await AntiFraudClient(config(), http).request_chat_stream("session", "hello", []) as response:
+                await response.aread()
+    asyncio.run(scenario())
+
+
+def test_recognized_official_session_wrapper_is_accepted():
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json=official_response())
+        )) as http:
+            assert await AntiFraudClient(config(), http).create_session() == "wrapped-session"
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("endpoint", ["session", "chat"])
+@pytest.mark.parametrize("source", ["inner", "outer"])
+def test_official_wrapper_401_refreshes_and_chat_key_survives_retry(endpoint, source):
+    async def scenario():
+        requests = []
+
+        def handler(request):
+            requests.append(request)
+            if request.url.path.endswith("/refresh"):
+                assert "x-chat-key" not in request.headers
+                return httpx.Response(200, json={"data": {"access_token": "new-token"}})
+            if request.headers["authorization"] == "Bearer old-token":
+                body = official_response("401", None) if source == "inner" else official_response(
+                    result=False, succeed=False, resultCode=401)
+                return httpx.Response(200, json=body)
+            if endpoint == "session":
+                return httpx.Response(200, json=official_response())
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, content="data: [DONE]\n\n")
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            service = AntiFraudClient(config(chat_key="example-chat-key"), http)
+            if endpoint == "session":
+                assert await service.create_session() == "wrapped-session"
+            else:
+                async with await service.request_chat_stream("session", "hello", []) as response:
+                    await response.aread()
+        assert [request.headers["authorization"] for request in requests] == ["Bearer old-token", "Bearer refresh-token", "Bearer new-token"]
+        for request in requests:
+            assert request.headers.get("x-chat-key") == ("example-chat-key" if request.url.path.endswith("/chat") else None)
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("body,expected", [
+    (official_response("403", None), 403),
+    (official_response("429", None), 429),
+    (official_response(result=False, succeed=False, resultCode=403), 403),
+    (official_response(result=False), 502),
+    (official_response(succeed=False), 502),
+    ({"result": False, "data": "should-not-be-used"}, 502),
+    ({"succeed": False, "data": "should-not-be-used"}, 502),
+    ({"resultCode": 500, "data": "should-not-be-used"}, 502),
+    (official_response(True, None), 502),
+    (official_response(401.5, None), 502),
+])
+@pytest.mark.parametrize("endpoint", ["session", "chat"])
+def test_official_wrapper_failures_do_not_refresh_or_disclose_messages(body, expected, endpoint):
+    async def scenario():
+        calls = []
+        message = "example-chat-key private-upstream-message"
+
+        def handler(request):
+            calls.append(request.url.path)
+            return httpx.Response(200, json={**body, "message": message}, headers={"retry-after": "12"})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            service = AntiFraudClient(config(chat_key="example-chat-key"), http)
+            with pytest.raises(APIError) as caught:
+                if endpoint == "session":
+                    await service.create_session()
+                else:
+                    async with await service.request_chat_stream("session", "hello", []):
+                        pytest.fail("failed chat response must not be opened")
+            assert caught.value.status_code == expected
+            assert "example-chat-key" not in str(caught.value)
+            assert "private-upstream-message" not in json.dumps(caught.value.as_dict())
+        assert len(calls) == 1
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("body", [
+    {"data": {"code": 401, "error": "ordinary-domain-value"}},
+    {"code": 200, "data": {"code": 403}},
+    {"data": {"result": False, "succeed": False, "resultCode": 401}},
+    official_response(payload={"code": 401, "error": "ordinary-domain-value"}),
+    {"result": {"code": 403}, "succeed": "domain-label", "data": {"code": 401}},
+])
+def test_arbitrary_payload_fields_are_not_recursively_treated_as_errors(body):
+    async def scenario():
+        calls = []
+
+        def handler(request):
+            calls.append(request.url.path)
+            return httpx.Response(200, json=body)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            assert await AntiFraudClient(config(), http).fetch_usage() == body
+        assert len(calls) == 1
+    asyncio.run(scenario())
