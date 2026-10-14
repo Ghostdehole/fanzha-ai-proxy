@@ -13,23 +13,26 @@ from adapter import CHAT_MODELS, OpenAIAdapter
 from errors import APIError
 from client import AntiFraudClient
 from config import AppConfig
-from routers.chat import ClosingStreamingResponse, _lines, router
+from routers.chat import ClosingStreamingResponse, StreamState, _chat_text, _frame, _lines, router
 
 
 class FakeResponse:
     def __init__(self, lines, raw_chunks=None):
         self.lines = lines
         self.raw_chunks = raw_chunks
+        self.exhausted = False
 
     async def aiter_bytes(self, chunk_size=None):
         if self.raw_chunks is not None:
             for chunk in self.raw_chunks:
                 yield chunk
+            self.exhausted = True
             return
         for line in self.lines:
             if isinstance(line, BaseException):
                 raise line
             yield (line + "\n").encode("utf-8")
+        self.exhausted = True
 
 
 class FakeContext:
@@ -40,7 +43,8 @@ class FakeContext:
         if self.service.enter_error:
             raise self.service.enter_error
         self.service.opened += 1
-        return FakeResponse(self.service.lines, self.service.raw_chunks)
+        self.service.last_response = FakeResponse(self.service.lines, self.service.raw_chunks)
+        return self.service.last_response
 
     async def __aexit__(self, *args):
         self.service.closed += 1
@@ -67,6 +71,14 @@ class FakeService:
     async def request_chat_stream(self, *args, **kwargs):
         self.calls.append((args, kwargs))
         return FakeContext(self)
+
+
+def official_sse_lines(*nodes):
+    """Synthetic public protocol shapes, without captured account identifiers."""
+    lines = []
+    for node in nodes:
+        lines.extend(["data: " + json.dumps({"code": 200, "data": node}, ensure_ascii=False), ""])
+    return lines
 
 
 def sse_frames(text):
@@ -205,6 +217,170 @@ class ChatTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status_code, 400)
         self.service.raw_chunks = [b'data: {"answer":"\\ud800"}\n\n']
         self.assertEqual((await self.post()).status_code, 502)
+
+    async def test_official_answer_elapsed_marker_completes_in_both_modes(self):
+        nodes = [
+            {"type": "answer", "answer": ""},
+            {"type": "node_status", "status": "running", "content": "internal node details"},
+            {"type": "answer", "answer": "请"},
+            {"type": "node_status", "status": "done", "text": "internal status text"},
+            {"type": "answer", "answer": "核实"},
+            {"type": "message_saved", "content": "internal persistence details"},
+            {"type": "answer", "answer": "来电。"},
+            {"type": "answer", "answer": "", "exec_elapsed_secs": "1.25"},
+            {"type": "message_saved", "content": "internal final metadata"},
+        ]
+        for strict in (False, True):
+            for stream in (False, True):
+                with self.subTest(strict=strict, stream=stream):
+                    self.service.cfg.require_stream_done = strict
+                    self.service.lines = official_sse_lines(*nodes)
+                    result = await self.post(stream=stream)
+                    self.assertEqual(result.status_code, 200)
+                    if stream:
+                        frames = sse_frames(result.text)
+                        self.assertFalse(any("error" in frame for frame in frames))
+                        text = "".join(frame["choices"][0]["delta"].get("content", "") for frame in frames)
+                        self.assertEqual(frames[-1]["choices"][0]["finish_reason"], "stop")
+                        self.assertTrue(result.text.endswith("data: [DONE]\n\n"))
+                    else:
+                        text = result.json()["choices"][0]["message"]["content"]
+                    self.assertEqual(text, "请核实来电。")
+                    self.assertTrue(self.service.last_response.exhausted)
+                    self.assertEqual(self.service.opened, self.service.closed)
+
+    async def test_elapsed_marker_preserves_final_text_and_closes_stream(self):
+        self.service.cfg.require_stream_done = True
+        for marker in (0, 0.0, "0", "0.0", "2.75", " 0.0 "):
+            for stream in (False, True):
+                with self.subTest(marker=marker, stream=stream):
+                    self.service.lines = official_sse_lines({"type": "answer", "answer": "完整正文", "exec_elapsed_secs": marker})
+                    # Native completion precedes the persistence trailer;
+                    # the reader must keep consuming it through normal EOF.
+                    self.service.lines.extend(official_sse_lines({"type": "message_saved", "content": "internal save metadata"}))
+                    result = await self.post(stream=stream)
+                    self.assertEqual(result.status_code, 200)
+                    if stream:
+                        frames = sse_frames(result.text)
+                        self.assertFalse(any("error" in frame for frame in frames))
+                        self.assertEqual("".join(frame["choices"][0]["delta"].get("content", "") for frame in frames), "完整正文")
+                    else:
+                        self.assertEqual(result.json()["choices"][0]["message"]["content"], "完整正文")
+                    self.assertTrue(self.service.last_response.exhausted)
+                    self.assertEqual(self.service.opened, self.service.closed)
+
+    async def test_transport_failure_after_native_completion_is_not_hidden(self):
+        self.service.cfg.require_stream_done = True
+        self.service.lines = official_sse_lines({"type": "answer", "answer": "正文", "exec_elapsed_secs": "0.2"})
+        self.service.lines.append(httpx.ReadError("interrupted persistence trailer"))
+        self.assertEqual((await self.post()).status_code, 502)
+        result = await self.post(stream=True)
+        self.assertEqual(result.status_code, 200)
+        self.assertIn("error", sse_frames(result.text)[-1])
+        self.assertNotIn('"finish_reason": "stop"', result.text)
+        self.assertEqual(self.service.opened, self.service.closed)
+
+    async def test_cancellation_while_waiting_for_native_trailer_closes_connection(self):
+        waiting_for_trailer = asyncio.Event()
+        class TrailerStream(httpx.AsyncByteStream):
+            closed = False
+
+            async def __aiter__(self):
+                yield b'data: {"code":200,"data":{"type":"answer","answer":"text","exec_elapsed_secs":"0.2"}}\n\n'
+                waiting_for_trailer.set()
+                await asyncio.Event().wait()
+
+            async def aclose(self):
+                await asyncio.sleep(0)
+                self.closed = True
+
+        source = TrailerStream()
+        cfg = AppConfig(access_token="synthetic-access", refresh_token="", token_state_file="", require_stream_done=True)
+        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(
+            200, headers={"content-type": "text/event-stream"}, stream=source,
+        ))) as http:
+            options = OpenAIAdapter.validate_chat({"messages": [{"role": "user", "content": "question"}]}, "fanzha-ai")
+            state = StreamState()
+            upstream = _chat_text(AntiFraudClient(cfg, http), "synthetic-session", None, options, state)
+            self.assertEqual(await upstream.__anext__(), "text")
+            pending = asyncio.create_task(upstream.__anext__())
+            await asyncio.wait_for(waiting_for_trailer.wait(), timeout=1)
+            self.assertTrue(state.complete)
+            self.assertFalse(source.closed)
+            pending.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await pending
+            await upstream.aclose()
+            self.assertTrue(source.closed)
+
+    async def test_explicit_terminal_marker_still_stops_without_waiting_for_eof(self):
+        self.service.cfg.require_stream_done = True
+        self.service.lines = official_sse_lines({"type": "answer", "answer": "正文"})
+        self.service.lines.extend(["data: [DONE]", "", httpx.ReadError("must not read past DONE")])
+        result = await self.post()
+        self.assertEqual(result.status_code, 200)
+        self.assertFalse(self.service.last_response.exhausted)
+        self.assertEqual(self.service.opened, self.service.closed)
+
+    async def test_empty_elapsed_marker_does_not_truncate_an_answer(self):
+        self.service.cfg.require_stream_done = True
+        for marker in (None, "", " "):
+            self.service.lines = official_sse_lines(
+                {"type": "answer", "answer": "前", "exec_elapsed_secs": marker},
+                {"type": "answer", "answer": "后", "exec_elapsed_secs": "0.1"},
+            )
+            result = await self.post()
+            self.assertEqual(result.status_code, 200)
+            self.assertEqual(result.json()["choices"][0]["message"]["content"], "前后")
+            self.service.lines = official_sse_lines({"type": "answer", "answer": "未完", "exec_elapsed_secs": marker})
+            self.assertEqual((await self.post()).status_code, 502)
+        self.assertEqual(self.service.opened, self.service.closed)
+
+    async def test_metadata_elapsed_values_never_complete_or_leak_text(self):
+        self.service.cfg.require_stream_done = True
+        for node in (
+            {"type": "node_status", "exec_elapsed_secs": "0.5", "text": "internal"},
+            {"type": "message_saved", "exec_elapsed_secs": "0.5", "content": "internal"},
+            {"type": "metadata", "exec_elapsed_secs": "0.5", "answer": "internal"},
+            {"type": "answer", "answer": "", "metadata": {"exec_elapsed_secs": "0.5"}},
+        ):
+            with self.subTest(node=node):
+                self.service.lines = official_sse_lines(
+                    {"type": "answer", "answer": "前"}, node,
+                    {"type": "answer", "answer": "后", "exec_elapsed_secs": "0.2"},
+                )
+                result = await self.post()
+                self.assertEqual(result.status_code, 200)
+                self.assertEqual(result.json()["choices"][0]["message"]["content"], "前后")
+                self.service.lines = official_sse_lines({"type": "answer", "answer": "正文"}, node)
+                self.assertEqual((await self.post()).status_code, 502)
+        self.assertEqual(self.service.opened, self.service.closed)
+
+    async def test_malformed_elapsed_markers_fail_safely_before_and_during_stream(self):
+        for marker in (True, False, -1, -0.5, "-0.1", "-1e-999", "NaN", "Infinity", "-Infinity", "1e999", "not-a-number", "1_0", [], {}):
+            with self.subTest(marker=marker):
+                for strict in (False, True):
+                    self.service.cfg.require_stream_done = strict
+                    self.service.lines = official_sse_lines({"type": "answer", "answer": "正文", "exec_elapsed_secs": marker})
+                    self.assertEqual((await self.post(stream=True)).status_code, 502)
+                    self.service.lines = official_sse_lines(
+                        {"type": "answer", "answer": "部分"},
+                        {"type": "answer", "answer": "", "exec_elapsed_secs": marker},
+                    )
+                    self.assertEqual((await self.post()).status_code, 502)
+                    result = await self.post(stream=True)
+                    self.assertEqual(result.status_code, 200)
+                    frames = sse_frames(result.text)
+                    self.assertIn("error", frames[-1])
+                    self.assertNotIn('"finish_reason": "stop"', result.text)
+                    self.assertTrue(result.text.endswith("data: [DONE]\n\n"))
+        self.assertEqual(self.service.opened, self.service.closed)
+
+    async def test_elapsed_completion_without_any_text_is_still_an_error(self):
+        self.service.lines = official_sse_lines({"type": "answer", "answer": "", "exec_elapsed_secs": 0})
+        for stream in (False, True):
+            self.assertEqual((await self.post(stream=stream)).status_code, 502)
+        self.assertEqual(self.service.opened, self.service.closed)
 
     async def test_known_finish_reason(self):
         self.service.lines = ['data: {"data":{"answer":"截断","finish_reason":"length"}}', '']
@@ -413,3 +589,36 @@ def test_sse_empty_text_fields_fall_back_to_populated_fields():
         {"data": {"answer": ""}, "text": "visible"},
     ]:
         assert _frame(json.dumps(event), "") == ("visible", None)
+
+
+def test_elapsed_completion_requires_the_exact_answer_node_location():
+    for event in [
+        {"type": "answer", "answer": "text", "exec_elapsed_secs": "0.2"},
+        {"exec_elapsed_secs": "0.2", "data": {"type": "answer", "answer": "text"}},
+        {"data": {"answer": "text", "exec_elapsed_secs": "0.2"}},
+        {"data": {"type": "answer", "answer": "text", "metadata": {"exec_elapsed_secs": "0.2"}}},
+    ]:
+        assert _frame(json.dumps(event), "")[1] is None
+    # Metadata event names take precedence even when their body resembles an answer.
+    assert _frame(json.dumps({"data": {"type": "answer", "answer": "internal", "exec_elapsed_secs": "0.2"}}), "metadata") == (None, None)
+
+
+def test_elapsed_completion_never_overrides_explicit_finish_reason_or_errors():
+    event = {"code": 200, "data": {"type": "answer", "answer": "text", "exec_elapsed_secs": "0.2", "finish_reason": "length"}}
+    assert _frame(json.dumps(event), "") == ("text", "length")
+    for marker in (float("nan"), float("inf"), float("-inf")):
+        event["data"]["exec_elapsed_secs"] = marker
+        try:
+            _frame(json.dumps(event), "")
+        except APIError as error:
+            assert error.status_code == 502
+        else:
+            raise AssertionError("Non-finite marker must be rejected")
+    event["data"]["exec_elapsed_secs"] = "0.2"
+    event["code"] = 403
+    try:
+        _frame(json.dumps(event), "")
+    except APIError as error:
+        assert error.status_code == 403
+    else:
+        raise AssertionError("Completion marker must not hide upstream errors")

@@ -1,10 +1,12 @@
 """Chat routes: request-scoped sessions and shared streaming/non-stream parsing."""
 import asyncio
 import json
+import math
 import re
 import time
 import uuid
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from typing import AsyncIterator, Optional, Tuple
 
 import anyio
@@ -31,17 +33,46 @@ def upstream_error(message: str) -> APIError:
     return APIError(message, status_code=502, err_type="upstream_error")
 
 
-def _frame(data: str, event_name: str) -> Tuple[Optional[str], Optional[str]]:
-    """Return (delta, finish reason). Metadata is never promoted to text."""
+def _answer_completed(node: dict) -> bool:
+    """The official answer event reports elapsed seconds on its final frame."""
+    if node.get("type") != "answer" or "exec_elapsed_secs" not in node:
+        return False
+    elapsed = node["exec_elapsed_secs"]
+    if elapsed is None or (isinstance(elapsed, str) and not elapsed.strip()):
+        return False
+    try:
+        if type(elapsed) not in (int, float, str):
+            raise ValueError("Invalid elapsed time type")
+        if isinstance(elapsed, str) and not re.fullmatch(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?", elapsed.strip()):
+            raise ValueError("Invalid elapsed time syntax")
+        # Decimal checks the sign exactly, including negative values that would
+        # underflow to -0.0; float finiteness rejects NaN/infinity/overflow.
+        seconds = Decimal(str(elapsed))
+        if not seconds.is_finite() or seconds < 0 or not math.isfinite(float(seconds)):
+            raise ValueError("Invalid elapsed time value")
+    except (InvalidOperation, ValueError, OverflowError):
+        raise upstream_error("Upstream returned an invalid answer completion marker.") from None
+    return True
+
+
+@dataclass(frozen=True)
+class ParsedFrame:
+    text: Optional[str] = None
+    finish_reason: Optional[str] = None
+    wait_for_eof: bool = False
+
+
+def _parse_frame(data: str, event_name: str) -> ParsedFrame:
+    """Parse content and completion without mistaking metadata for an answer."""
     if event_name.lower() in {"error", "failed", "failure"}:
         raise upstream_error("Upstream reported a stream error.")
     if data.strip() == "[DONE]":
-        return None, "stop"
+        return ParsedFrame(finish_reason="stop")
     if event_name.lower() in {"ping", "pong", "heartbeat", "keepalive", "keep-alive"}:
-        return None, None
+        return ParsedFrame()
     terminal = event_name.lower() in {"done", "end", "complete", "completed", "finish", "finished"}
     if not data.strip():
-        return None, "stop" if terminal else None
+        return ParsedFrame(finish_reason="stop" if terminal else None)
     try:
         event = json.loads(data)
     except (ValueError, TypeError):
@@ -66,9 +97,16 @@ def _frame(data: str, event_name: str) -> Tuple[Optional[str], Optional[str]]:
             if not isinstance(reason, str) or reason not in {"stop", "length", "content_filter"}:
                 raise upstream_error("Upstream returned an unsupported completion reason.")
             finish_reason = reason
-    metadata_types = {"metadata", "usage", "status", "session", "session_created", "start", "message_start", "ping", "pong", "heartbeat", "keepalive", "keep-alive"}
-    if event_name.lower() in metadata_types or str(event.get("type", "")).lower() in metadata_types:
-        return None, finish_reason
+    metadata_types = {"metadata", "usage", "status", "session", "session_created", "start", "message_start", "node_status", "message_saved", "ping", "pong", "heartbeat", "keepalive", "keep-alive"}
+    if event_name.lower() in metadata_types or any(str(obj.get("type", "")).lower() in metadata_types for obj in nodes):
+        return ParsedFrame(finish_reason=finish_reason)
+    wait_for_eof = False
+    if isinstance(node, dict) and _answer_completed(node):
+        # Native elapsed-time completion precedes message_saved. Like the
+        # official reader, consume this persistence trailer through normal EOF.
+        # Existing explicit terminal markers retain their immediate stop policy.
+        wait_for_eof = finish_reason is None
+        finish_reason = finish_reason or "stop"
     text = None
     for obj in reversed(nodes):
         for key in ("answer", "content", "text"):
@@ -89,7 +127,13 @@ def _frame(data: str, event_name: str) -> Tuple[Optional[str], Optional[str]]:
             text.encode("utf-8")
         except UnicodeError:
             raise upstream_error("Upstream returned invalid Unicode text.") from None
-    return text, finish_reason
+    return ParsedFrame(text, finish_reason, wait_for_eof)
+
+
+def _frame(data: str, event_name: str) -> Tuple[Optional[str], Optional[str]]:
+    """Compatibility view for callers that only need content and finish reason."""
+    frame = _parse_frame(data, event_name)
+    return frame.text, frame.finish_reason
 
 
 async def _lines(response, max_bytes: int) -> AsyncIterator[str]:
@@ -168,14 +212,15 @@ async def _chat_text(service, session_id, token, options, state: StreamState) ->
             temperature=options.temperature, max_tokens=options.max_tokens,
         ) as response:
             async for raw, event_name in _events(response, getattr(cfg, "max_upstream_response_bytes", 8 * 1024 * 1024)):
-                text, reason = _frame(raw, event_name)
-                if text:
+                frame = _parse_frame(raw, event_name)
+                if frame.text:
                     state.has_text = True
-                    yield text
-                if reason is not None:
-                    state.finish_reason = reason
+                    yield frame.text
+                if frame.finish_reason is not None:
+                    state.finish_reason = frame.finish_reason
                     state.complete = True
-                    break
+                    if not frame.wait_for_eof:
+                        break
             if not state.has_text:
                 raise upstream_error("Upstream completed without any assistant text.")
             if not state.complete and getattr(cfg, "require_stream_done", False):

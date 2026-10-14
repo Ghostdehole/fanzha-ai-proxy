@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional
 import anyio
 import httpx
 
-from config import AppConfig, clean_token, logger
+from config import AppConfig, clean_token, logger, validate_chat_key
 from errors import APIError
 from utils import split_text_for_tts, concatenate_wav_streams
 
@@ -40,6 +40,7 @@ class AntiFraudClient:
 
     def __init__(self, cfg: AppConfig, http_client: httpx.AsyncClient):
         self.cfg = cfg
+        self._chat_key = validate_chat_key(getattr(cfg, "chat_key", ""))
         self.client = http_client
         self.access_token = clean_token(cfg.access_token)
         self.refresh_token = clean_token(cfg.refresh_token)
@@ -155,15 +156,27 @@ class AntiFraudClient:
         if not 200 <= response.status_code < 300:
             raise self._status_error(response.status_code, response)
 
+    def _check_business_code(self, code: Any, response: httpx.Response) -> None:
+        if code is None or (type(code) in (int, str) and str(code) in ("0", "200", "10000")):
+            return
+        # Only exact status values identify authentication/rate-limit errors;
+        # coercing a float or boolean can cause an unrelated failure to refresh.
+        status_code = int(code) if type(code) in (int, str) and str(code) in ("401", "403", "429") else 502
+        raise self._status_error(status_code, response)
+
     def _check_business_status(self, data: Dict[str, Any], response: httpx.Response) -> None:
-        code = data.get("code")
-        if code is not None and str(code) not in ("0", "200", "10000"):
-            try:
-                status_code = int(code)
-            except (TypeError, ValueError):
-                status_code = 502
-            raise self._status_error(status_code, response)
-        if data.get("success") is False or data.get("error"):
+        self._check_business_code(data.get("code"), response)
+        self._check_business_code(data.get("resultCode"), response)
+        # The supplied official response has this explicit two-layer envelope.
+        # Do not recursively interpret arbitrary result payloads as statuses.
+        official_wrapper = (
+            type(data.get("result")) is bool
+            and type(data.get("succeed")) is bool
+            and "resultCode" in data
+        )
+        if official_wrapper and isinstance(data.get("data"), dict):
+            self._check_business_code(data["data"].get("code"), response)
+        if any(data.get(flag) is False for flag in ("success", "result", "succeed")) or data.get("error"):
             raise APIError("Upstream returned an error response.", 502, "upstream_error")
 
     async def _read_json(self, response: httpx.Response) -> Dict[str, Any]:
@@ -297,7 +310,10 @@ class AntiFraudClient:
         for attempt in range(2):
             token = self._resolve_token(current_token)
             try:
-                request = self.client.build_request("POST", self.chat_url, headers=self.build_headers(token), json=payload)
+                headers = self.build_headers(token)
+                if self._chat_key:
+                    headers["X-Chat-Key"] = self._chat_key
+                request = self.client.build_request("POST", self.chat_url, headers=headers, json=payload)
                 response = await self._send_stream(request)
                 self._check_http_status(response)
                 if response.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "text/event-stream":
